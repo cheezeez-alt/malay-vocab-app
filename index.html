@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Malay Vocab Revision with Full SR Sync</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        'primary': '#4F46E5', // Indigo 600
+                        'primary-dark': '#4338CA', // Indigo 700
+                        'success': '#10B981', // Emerald 500
+                        'error': '#EF4444', // Red 500
+                        'gold': '#FFD700', // Gold for coins
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom CSS for visual polish */
+        .card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center p-4">
+
+<div id="app" class="w-full max-w-2xl">
+    <h1 class="text-4xl font-extrabold text-center text-gray-900 mb-6">Malay Vocab Builder (Gamified)</h1>
+
+    <!-- Loading/Error Message -->
+    <div id="message" class="card bg-white p-6 rounded-xl text-center text-lg text-gray-600 mb-6">Loading vocabulary...</div>
+
+    <!-- Navigation/Mode Selection -->
+    <div id="game-controls" class="flex justify-center space-x-4 mb-8 hidden">
+        <button onclick="startGame('mc')" class="btn-primary bg-primary text-white font-semibold py-3 px-6 rounded-xl hover:bg-primary-dark">
+            1. Multiple Choice (Meaning)
+        </button>
+        <button onclick="startGame('match')" class="btn-primary bg-primary text-white font-semibold py-3 px-6 rounded-xl hover:bg-primary-dark">
+            2. Matching (Synonym/Antonym)
+        </button>
+        <button onclick="startGame('spell')" class="btn-primary bg-primary text-white font-semibold py-3 px-6 rounded-xl hover:bg-primary-dark">
+            3. Spelling Test
+        </button>
+    </div>
+    
+    <!-- Scoreboard/Question Counter -->
+    <div id="scoreboard" class="flex justify-between items-center bg-white p-4 rounded-xl card mb-4 hidden">
+        <div class="text-lg font-semibold text-gray-700">
+            Due Words: <span id="due-words-count" class="text-primary-dark">0</span>
+        </div>
+        <div class="text-lg font-semibold text-gray-700">
+            Session: <span id="question-counter" class="text-primary-dark">0 / 10</span>
+        </div>
+        <div class="text-lg font-semibold text-gray-700">
+            Correct: <span id="correct-counter" class="text-success">0</span>
+        </div>
+        <!-- Coin Wallet Display -->
+        <div class="text-lg font-bold text-gray-700 flex items-center">
+            <svg class="w-6 h-6 text-gold mr-1 fill-current" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM17 14H15C15 15.66 13.66 17 12 17C10.34 17 9 15.66 9 14H7C7 16.76 9.24 19 12 19C14.76 19 17 16.76 17 14ZM17 10C17 7.24 14.76 5 12 5C9.24 5 7 7.24 7 10H9C9 8.34 10.34 7 12 7C13.66 7 15 8.34 15 10H17Z"/>
+            </svg>
+            Coins: <span id="coin-counter" class="ml-1 text-gold">0</span>
+        </div>
+    </div>
+
+    <!-- Game Area -->
+    <div id="game-area" class="card bg-white p-6 md:p-10 rounded-xl hidden">
+        <div id="game-container">
+            <!-- Game specific content will be rendered here -->
+        </div>
+
+        <div id="result-message" class="mt-6 text-center text-xl font-bold hidden"></div>
+
+        <!-- Continue Button -->
+        <div class="flex justify-center mt-6">
+            <button id="next-button" onclick="nextWord()" class="btn-primary bg-success text-white font-semibold py-3 px-8 rounded-xl hover:bg-primary-dark">
+                Next Word
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- Configuration ---
+    const MAX_QUESTIONS = 10; 
+    const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/1xZwDrLKdhGFjo2yxHelIYn9bRhKynCM6OAIW5VEW44A/gviz/tq?tqx=out:csv&gid=0';
+    
+    // 🛑 CRITICAL: PASTE YOUR NEW DEPLOYED GOOGLE APPS SCRIPT EXECUTION API URL HERE!
+    // This URL will be longer than the old one. This is for the POST requests only.
+    const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzSHyxt2rpcYKNBxlx5QwpTQgoIQJFlDny-MQd41QnpbXViPMqSz4bdPinG5hDHkY23/exec'; 
+    const MAX_RETRIES = 3;
+    const INITIAL_DELAY_MS = 1000;
+
+    // --- Global State ---
+    let vocabulary = [];
+    let dueVocabulary = []; // Words determined to be due for review today
+    let sessionVocabulary = []; // Words selected for the current quiz session
+    let currentWord = null;
+    let currentMode = null;
+    let gameActive = false;
+    
+    let correctAnswersCount = 0; 
+    let questionsAttempted = 0; 
+    let coins = 0; // Coin counter is now persistent, initialized to 0 until loaded
+
+    // --- DOM Elements ---
+    const messageEl = document.getElementById('message');
+    const controlsEl = document.getElementById('game-controls');
+    const gameAreaEl = document.getElementById('game-area');
+    const gameContainerEl = document.getElementById('game-container');
+    const resultMessageEl = document.getElementById('result-message');
+    const nextButtonEl = document.getElementById('next-button');
+    const coinCounterEl = document.getElementById('coin-counter');
+
+    // --- Utility Functions ---
+
+    // Simple shuffle function
+    const shuffleArray = (array) => {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+    };
+    
+    // Checks if a word is due for review today based on its interval and last practice date
+    const isWordDue = (word) => {
+        const intervalDays = parseFloat(word.sr_i) || 0;
+        const lastPractice = word.lastPracticeDate ? new Date(word.lastPracticeDate) : null;
+        
+        // If never practiced (or interval is 0), it's due
+        if (!lastPractice || intervalDays === 0) {
+            return true;
+        }
+
+        // Calculate the next review date
+        const nextReviewDate = new Date(lastPractice.getTime());
+        nextReviewDate.setDate(nextReviewDate.getDate() + intervalDays);
+        
+        // Check if the next review date is today or earlier
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); 
+        nextReviewDate.setHours(0, 0, 0, 0);
+
+        return today >= nextReviewDate;
+    };
+
+
+    // A simple CSV parser (Reads 10 columns for SR data + Coins)
+    const parseCSV = (csv) => {
+        const lines = csv.split('\n').filter(line => line.trim() !== '');
+        if (lines.length < 2) return { vocab: [], coins: 0 };
+
+        const header = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+        const data = [];
+        let globalCoins = 0;
+
+        for (let i = 1; i < lines.length; i++) {
+            // Updated regex to handle quoted values correctly
+            const values = lines[i].match(/(".*?"|[^",\r\n]+)(?=\s*,|\s*$)/g)?.map(v => v.trim().replace(/^"|"$/g, '')) || [];
+            
+            // Expecting at least 10 columns: A-I (SR data) + J (Coins)
+            if (values.length >= 10) {
+                const row = {};
+                row.malay = values[0];
+                row.meaning = values[1];
+                row.synonym = values[2] || '';
+                row.antonym = values[3] || '';
+                
+                // Progress Columns (E, F, G, H, I)
+                row.lastPracticeStatus = values[4] || ''; // E (Last Status: Correct/Wrong)
+                row.lastPracticeTimestamp = values[5] || ''; // F (Date/Time String)
+                row.sr_n = parseInt(values[6]) || 0; // G (Repetitions)
+                row.sr_ef = parseFloat(values[7]) || 2.5; // H (Ease Factor - default 2.5)
+                row.sr_i = parseInt(values[8]) || 0; // I (Interval in days)
+                
+                // Read Coins from Column J (index 9 in a 0-based array) - only from the first data row (i=1)
+                if (i === 1) {
+                    globalCoins = parseInt(values[9]) || 0;
+                }
+                
+                // Use the Timestamp (F) to determine the last practice date for SM-2 check
+                row.lastPracticeDate = (values[5] && values[5] !== 'Timestamp') ? values[5].split(' ')[0] : null; 
+                
+                // Row number is 1-based index for sheet row
+                row.rowNumber = i + 1; 
+                
+                // Only include rows where the Malay word is not empty
+                if (row.malay.trim() !== "") {
+                    data.push(row);
+                }
+            }
+        }
+        return { vocab: data, coins: globalCoins };
+    };
+
+    // --- Data Loading with Retry Logic ---
+
+    const loadVocabulary = async () => {
+        messageEl.textContent = 'Fetching word list and player data from Google Sheet...';
+        
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                // FIX: Add cache-buster to the CSV URL to ensure we get the latest data, including coins.
+                const cacheBusterUrl = `${SHEET_CSV_URL}&t=${Date.now()}`;
+                const response = await fetch(cacheBusterUrl);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const csvText = await response.text();
+                const parsedData = parseCSV(csvText);
+
+                vocabulary = parsedData.vocab;
+                coins = parsedData.coins; // 🌟 LOAD PERSISTENT COINS
+
+                if (vocabulary.length === 0) {
+                    messageEl.textContent = 'Error: No valid vocabulary found. Check your sheet content or link.';
+                    return;
+                }
+                
+                // Filter vocabulary to only include words that are due for review
+                dueVocabulary = vocabulary.filter(isWordDue);
+
+                // Setup UI for interaction
+                messageEl.classList.add('hidden');
+                controlsEl.classList.remove('hidden');
+                document.getElementById('scoreboard').classList.remove('hidden'); 
+
+                console.log(`Successfully loaded ${vocabulary.length} words. ${dueVocabulary.length} are currently due for review. Current Coins: ${coins}`); 
+                
+                // CRUCIAL: Update the display with the loaded coin count immediately
+                updateScoreboard(); 
+                
+                return; // Success, exit the function
+
+            } catch (error) {
+                console.warn(`Attempt ${attempt} failed: ${error.message}`);
+                
+                if (attempt === MAX_RETRIES) {
+                    console.error("Failed to load vocabulary after all retries.");
+                    messageEl.textContent = `Failed to load vocabulary after ${MAX_RETRIES} attempts. Please check URL and sharing settings.`;
+                    return;
+                }
+                
+                const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
+                messageEl.textContent = `Error loading. Retrying in ${delay / 1000}s... (Attempt ${attempt + 1}/${MAX_RETRIES})`;
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } finally {
+                // Update scoreboard regardless of error on first load
+                updateScoreboard(); 
+            }
+        }
+    };
+    
+    // --- Server Communication (Google Apps Script) ---
+    
+    /**
+     * Sends the updated SM2 progress metrics to the Google Apps Script for sheet update.
+     */
+    const updateSheetProgress = async (rowNumber, correct, newMetrics) => {
+        if (GOOGLE_APPS_SCRIPT_URL.includes('PASTE_NEW_API_EXECUTION_URL_HERE')) {
+            console.error("Progress not saved: GOOGLE_APPS_SCRIPT_URL is a placeholder.");
+            return;
+        }
+
+        const data = {
+            action: 'updateProgress', // Must match action in Code.gs
+            row: rowNumber,
+            status: correct ? 'Correct' : 'Wrong',
+            sr_n: newMetrics.sr_n,
+            sr_ef: newMetrics.sr_ef,
+            sr_i: newMetrics.sr_i
+        };
+        
+        // Convert to x-www-form-urlencoded format
+        const postBody = new URLSearchParams(data).toString();
+
+        const postOptions = {
+            method: 'POST',
+            mode: 'no-cors', // Must use 'no-cors' for Apps Script
+            cache: 'no-cache',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: postBody
+        };
+
+        try {
+            await fetch(GOOGLE_APPS_SCRIPT_URL, postOptions);
+            console.log(`Progress for row ${rowNumber} sent successfully.`);
+        } catch (error) {
+            console.warn(`Failed to send progress update for row ${rowNumber}. Check Apps Script logs.`, error);
+        }
+    };
+    
+    /**
+     * Sends the total coin count to the Google Apps Script for persistence.
+     */
+    const updateCoinsOnSheet = async (currentCoins) => {
+        if (GOOGLE_APPS_SCRIPT_URL.includes('PASTE_NEW_API_EXECUTION_URL_HERE')) {
+            console.error("Coins not saved: GOOGLE_APPS_SCRIPT_URL is a placeholder.");
+            return;
+        }
+
+        const data = {
+            action: 'updateCoins', // Must match action in Code.gs
+            newCoins: currentCoins,
+        };
+        
+        // Convert to x-www-form-urlencoded format
+        const postBody = new URLSearchParams(data).toString();
+
+        const postOptions = {
+            method: 'POST',
+            mode: 'no-cors', 
+            cache: 'no-cache',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: postBody
+        };
+
+        try {
+            await fetch(GOOGLE_APPS_SCRIPT_URL, postOptions);
+            console.log(`Coin count (${currentCoins}) sent successfully.`);
+        } catch (error) {
+            console.warn(`Failed to send coin update. Check Apps Script logs.`, error);
+        }
+    };
+
+
+    // --- Spaced Repetition (SuperMemo 2) Algorithm ---
+    
+    /**
+     * Calculates the new N (repetitions), EF (ease factor), and I (interval)
+     */
+    const calculateSM2 = (word, correct) => {
+        // Get current progress from the word object
+        let n = word.sr_n;
+        let ef = word.sr_ef;
+        
+        // Quality of response: 5 for correct, 1 for incorrect (simplification)
+        const quality = correct ? 5 : 1;
+        
+        // 1. Calculate new Ease Factor (EF)
+        ef = ef + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
+        ef = Math.max(1.3, ef); 
+
+        // 2. Calculate new Repetitions (N)
+        if (correct) {
+            n += 1; 
+        } else {
+            n = 0; // Reset N if incorrect
+        }
+
+        // 3. Calculate new Interval (I) in days
+        let i;
+        if (n === 1) {
+            i = 1;
+        } else if (n === 2) {
+            i = 6;
+        } else if (n > 2) {
+            i = Math.round(word.sr_i * ef); // Use previous interval * new EF
+        } else { // If n === 0 (incorrect answer)
+            i = 1; // Due tomorrow
+        }
+        
+        // Ensure interval is at least 1 day if it was just answered incorrectly
+        if (i < 1) i = 1;
+
+        // 4. Return the new metrics
+        return { 
+            sr_n: n, 
+            sr_ef: parseFloat(ef.toFixed(2)), 
+            sr_i: parseInt(i),
+        };
+    };
+    
+    // Updates the question number, correct counter, DUE count, and coin count display
+    const updateScoreboard = () => {
+        const sessionTotal = sessionVocabulary.length;
+        document.getElementById('question-counter').textContent = `${questionsAttempted} / ${sessionTotal}`;
+        document.getElementById('correct-counter').textContent = correctAnswersCount;
+        document.getElementById('due-words-count').textContent = dueVocabulary.length;
+        coinCounterEl.textContent = coins; // Update coin display
+    };
+
+
+    // --- Game Flow Control ---
+
+    const startGame = (mode) => {
+        currentMode = mode;
+        correctAnswersCount = 0; 
+        questionsAttempted = 0; 
+        
+        // 1. Use the pre-filtered dueVocabulary
+        let usableVocab = [...dueVocabulary];
+
+        // 2. Further filter based on mode requirements
+        if (mode === 'match') {
+            usableVocab = usableVocab.filter(w => w.synonym.trim() !== "" || w.antonym.trim() !== "");
+        }
+        
+        // 3. Implement Advanced Prioritization (Hard/New Words First)
+        // Sort by Ease Factor (sr_ef) ascending. Lower EF means it's harder or newer (EF resets on failure).
+        // Secondary sort by Repetitions (sr_n) ascending. Fewer reps means less practiced.
+        usableVocab.sort((a, b) => {
+            if (a.sr_ef !== b.sr_ef) {
+                return a.sr_ef - b.sr_ef; // Lower EF (harder) comes first
+            }
+            return a.sr_n - b.sr_n; // Lower N (fewer reps) comes first
+        });
+
+        // 4. Select the first MAX_QUESTIONS words for the session (which are now the hardest/newest)
+        sessionVocabulary = usableVocab.slice(0, MAX_QUESTIONS); 
+        
+        // Check if there are words to study
+        if (sessionVocabulary.length === 0) {
+            gameAreaEl.classList.remove('hidden');
+            gameContainerEl.innerHTML = `
+                <h2 class="text-3xl font-bold text-center text-success mb-4">No Words Due!</h2>
+                <p class="text-xl text-gray-700 text-center">You're all caught up! Go earn some coins tomorrow!</p>
+            `;
+            controlsEl.classList.remove('hidden');
+            nextButtonEl.classList.add('hidden');
+            return;
+        }
+
+        gameAreaEl.classList.remove('hidden');
+        controlsEl.classList.add('hidden');
+        resultMessageEl.classList.add('hidden');
+        nextButtonEl.classList.add('hidden');
+
+        gameActive = true;
+        loadQuestion();
+    };
+
+
+    const loadQuestion = () => {
+        const sessionTotal = sessionVocabulary.length;
+        // Check if the current question is the LAST question in the session.
+        if (questionsAttempted >= sessionTotal || questionsAttempted >= MAX_QUESTIONS) {
+            gameContainerEl.innerHTML = `
+                <h2 class="text-3xl font-bold text-success mb-4">Session Complete!</h2>
+                <p class="text-xl text-gray-700">You finished the ${sessionTotal}-question challenge.</p>
+                <p class="text-4xl font-extrabold mt-6">Your Final Score:</p>
+                <p class="text-6xl font-extrabold text-primary">${correctAnswersCount} / ${sessionTotal}</p>
+                <p class="text-2xl font-extrabold text-gold mt-4 flex justify-center items-center">
+                    <svg class="w-8 h-8 text-gold mr-1 fill-current" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM17 14H15C15 15.66 13.66 17 12 17C10.34 17 9 15.66 9 14H7C7 16.76 9.24 19 12 19C14.76 19 17 16.76 17 14ZM17 10C17 7.24 14.76 5 12 5C9.24 5 7 7.24 7 10H9C9 8.34 10.34 7 12 7C13.66 7 15 8.34 15 10H17Z"/>
+                    </svg>
+                    You earned ${correctAnswersCount} Coins!
+                </p>
+                <p class="text-sm text-gray-500 mt-6">To start a new session, choose a game mode above.</p>
+            `;
+            // After session ends, reload vocabulary to update the 'due' count for next session
+            loadVocabulary(); 
+            controlsEl.classList.remove('hidden');
+            nextButtonEl.classList.add('hidden');
+            return;
+        }
+
+        currentWord = sessionVocabulary[questionsAttempted]; 
+        
+        resultMessageEl.classList.add('hidden');
+        nextButtonEl.classList.add('hidden');
+        gameActive = true;
+        
+        updateScoreboard(); 
+
+        gameContainerEl.innerHTML = ''; 
+
+        switch (currentMode) {
+            case 'mc':
+                renderMultipleChoice();
+                break;
+            case 'match':
+                renderMatchingQuiz();
+                break;
+            case 'spell':
+                renderSpellingTest();
+                break;
+        }
+    };
+
+    const nextWord = () => {
+        loadQuestion();
+    };
+
+    // Called when an answer is submitted/selected
+    const processAnswer = (correct) => {
+        if (!gameActive) return;
+
+        gameActive = false;
+        
+        // 1. Calculate new SR metrics
+        const newMetrics = calculateSM2(currentWord, correct);
+        
+        // 2. 🚨 UPDATE SHEET PROGRESS ASYNCHRONOUSLY
+        updateSheetProgress(currentWord.rowNumber, correct, newMetrics);
+        
+        // 3. Update counters
+        if (correct) {
+            correctAnswersCount++; 
+            coins++; // Award 1 coin for a correct answer
+            updateCoinsOnSheet(coins); // 🌟 SAVE COIN CHANGE
+        }
+        questionsAttempted++; 
+
+        // 4. Update UI
+        updateScoreboard(); 
+        
+        // Provide feedback including the new interval
+        let feedback = correct 
+            ? '✅ Correct! You earned 1 Coin.' 
+            : '❌ Incorrect. Keep practicing!';
+            
+        feedback += `<br><span class="text-base font-normal">Next review in ${newMetrics.sr_i} days. (Ease Factor: ${newMetrics.sr_ef.toFixed(2)})</span>`;
+        
+        resultMessageEl.innerHTML = feedback;
+        resultMessageEl.classList.remove(correct ? 'text-error' : 'text-success');
+        resultMessageEl.classList.add(correct ? 'text-success' : 'text-error');
+        resultMessageEl.classList.remove('hidden');
+        nextButtonEl.classList.remove('hidden');
+    };
+
+    // --- Game 1: Multiple Choice (Meaning) ---
+
+    const renderMultipleChoice = () => {
+        const word = currentWord.malay;
+        const correctAnswer = currentWord.meaning;
+
+        const distractors = shuffleArray(vocabulary
+            .filter(w => w.malay !== word)
+            .map(w => w.meaning))
+            .slice(0, 3);
+
+        const options = shuffleArray([correctAnswer, ...distractors]);
+
+        const optionHtml = options.map((opt, index) => `
+            <button onclick="checkMultipleChoice('${opt.replace(/'/g, "\\'")}', '${correctAnswer.replace(/'/g, "\\'")}')" 
+                    id="mc-option-${index}"
+                    class="mc-option w-full text-left p-4 my-2 border border-gray-200 rounded-xl bg-gray-50 hover:bg-primary/50 hover:text-white transition duration-200 focus:outline-none focus:ring-4 focus:ring-primary-dark focus:ring-opacity-50">
+                ${opt}
+            </button>
+        `).join('');
+
+        gameContainerEl.innerHTML = `
+            <h2 class="text-3xl font-bold text-center text-primary-dark mb-8">What is the meaning of: <span class="text-primary">${word}</span>?</h2>
+            <div id="mc-options">
+                ${optionHtml}
+            </div>
+        `;
+    };
+
+    window.checkMultipleChoice = (selected, correct) => {
+        if (!gameActive) return;
+
+        const allButtons = document.querySelectorAll('.mc-option');
+        const isCorrect = selected.trim() === correct.trim();
+        
+        allButtons.forEach(btn => {
+            btn.disabled = true;
+            const btnText = btn.textContent.trim().replace(/'/g, "\\'");
+            
+            if (btnText === correct.trim().replace(/'/g, "\\'")) {
+                btn.classList.replace('bg-gray-50', 'bg-success');
+                btn.classList.add('text-white');
+                btn.classList.remove('hover:bg-primary/50');
+            } else if (btnText === selected.trim().replace(/'/g, "\\'") && !isCorrect) {
+                btn.classList.replace('bg-gray-50', 'bg-error');
+                btn.classList.add('text-white');
+                btn.classList.remove('hover:bg-primary/50');
+            }
+        });
+
+        processAnswer(isCorrect);
+    };
+
+    // --- Game 2: Matching Quiz (Synonym/Antonym) ---
+
+    const renderMatchingQuiz = () => {
+        let targetField = 'synonym';
+        let targetType = 'Synonym';
+        
+        const hasSynonym = currentWord.synonym.trim() !== "";
+        const hasAntonym = currentWord.antonym.trim() !== "";
+
+        if (hasSynonym && hasAntonym) {
+            if (Math.random() < 0.5) {
+                targetField = 'antonym';
+                targetType = 'Antonym';
+            }
+        } else if (hasAntonym) {
+            targetField = 'antonym';
+            targetType = 'Antonym';
+        }
+
+        const getTargetTerm = (word) => {
+            return word[targetField].trim();
+        };
+        
+        const correctAnswerTerm = getTargetTerm(currentWord);
+
+        const validDistractors = vocabulary.filter(w => 
+            w.rowNumber !== currentWord.rowNumber && 
+            w[targetField].trim() !== "" &&
+            w[targetField].trim().toLowerCase() !== correctAnswerTerm.toLowerCase()
+        );
+
+        const distractors = shuffleArray(validDistractors).slice(0, 3);
+        
+        let matchedWords = [currentWord, ...distractors];
+        shuffleArray(matchedWords); 
+
+        const leftTerms = matchedWords.map(w => ({ term: w.malay, id: w.rowNumber }));
+        const rightTerms = matchedWords.map(w => ({ term: getTargetTerm(w), id: w.rowNumber }));
+
+        shuffleArray(rightTerms);
+
+        gameContainerEl.innerHTML = `
+            <h2 class="text-3xl font-bold text-center text-primary-dark mb-8">Match the Malay word with its ${targetType}.</h2>
+            <div id="match-game" class="flex justify-between space-x-4">
+                <div id="left-column" class="flex flex-col w-1/2"></div>
+                <div id="right-column" class="flex flex-col w-1/2"></div>
+            </div>
+        `;
+        
+        const leftColEl = document.getElementById('left-column');
+        const rightColEl = document.getElementById('right-column');
+
+        leftTerms.forEach(item => {
+            leftColEl.innerHTML += `<button id="left-${item.id}" data-id="${item.id}" data-type="left" onclick="selectMatch(this)" class="match-btn left-btn p-3 my-2 border border-gray-300 rounded-xl bg-gray-50 hover:bg-primary/20 transition duration-150">${item.term}</button>`;
+        });
+
+        rightTerms.forEach(item => {
+            rightColEl.innerHTML += `<button id="right-${item.id}" data-id="${item.id}" data-type="right" onclick="selectMatch(this)" class="match-btn right-btn p-3 my-2 border border-gray-300 rounded-xl bg-gray-50 hover:bg-primary/20 transition duration-150">${item.term}</button>`;
+        });
+        
+        // Highlight the current word to focus the user
+        document.getElementById(`left-${currentWord.rowNumber}`).classList.remove('bg-gray-50');
+        document.getElementById(`left-${currentWord.rowNumber}`).classList.add('bg-primary', 'text-white', 'font-bold', 'ring-2', 'ring-primary-dark');
+    };
+    
+    let selectedRight = null;
+    window.selectMatch = (button) => {
+        if (!gameActive) return;
+
+        const id = button.getAttribute('data-id');
+        const type = button.getAttribute('data-type');
+        
+        if (type === 'right') {
+            document.querySelectorAll('.right-btn').forEach(btn => btn.classList.remove('bg-yellow-200'));
+            button.classList.add('bg-yellow-200');
+            selectedRight = id;
+
+            if (id == currentWord.rowNumber) {
+                // Correct match for the current focus word!
+                button.classList.remove('bg-yellow-200', 'hover:bg-primary/20');
+                button.classList.add('bg-success', 'text-white');
+                document.getElementById(`left-${currentWord.rowNumber}`).classList.remove('bg-primary', 'text-white', 'ring-2', 'ring-primary-dark');
+                document.getElementById(`left-${currentWord.rowNumber}`).classList.add('bg-success', 'text-white');
+                document.querySelectorAll('.match-btn').forEach(btn => btn.disabled = true);
+                processAnswer(true);
+            } else if (selectedRight !== null) {
+                // The user selected a distractor match.
+                button.classList.remove('bg-yellow-200', 'hover:bg-primary/20');
+                button.classList.add('bg-error', 'text-white');
+                document.querySelectorAll('.match-btn').forEach(btn => btn.disabled = true);
+                
+                const correctRightBtn = document.getElementById(`right-${currentWord.rowNumber}`);
+                if(correctRightBtn) {
+                     correctRightBtn.classList.remove('bg-yellow-200', 'hover:bg-primary/20');
+                     correctRightBtn.classList.add('bg-success', 'text-white');
+                }
+                processAnswer(false);
+            }
+        }
+    };
+
+
+    // --- Game 3: Spelling Test ---
+
+    const renderSpellingTest = () => {
+        const meaning = currentWord.meaning;
+        let promptHtml = `Spell the Malay word that means: <span class="text-primary">"${meaning}"</span>`;
+        let hintText = '';
+
+        if (currentWord.synonym.trim() !== "") {
+            hintText += `Synonym: ${currentWord.synonym}. `;
+        }
+        if (currentWord.antonym.trim() !== "") {
+            hintText += `Antonym: ${currentWord.antonym}.`;
+        }
+        
+        if (hintText.trim() !== "") {
+             promptHtml += `<div class="text-base font-medium text-gray-500 mt-2">Context: ${hintText.trim()}</div>`;
+        }
+
+        gameContainerEl.innerHTML = `
+            <h2 class="text-3xl font-bold text-center text-primary-dark mb-8">${promptHtml}</h2>
+            <div class="flex flex-col items-center space-y-4">
+                <input type="text" id="spelling-input" 
+                       class="w-full md:w-2/3 p-4 text-xl border-2 border-gray-300 rounded-xl focus:border-primary focus:ring-primary transition duration-150" 
+                       placeholder="Type the Malay word here"
+                       onkeydown="if(event.key === 'Enter') checkSpelling()">
+                <button onclick="checkSpelling()" id="spell-submit" class="btn-primary bg-primary text-white font-semibold py-3 px-8 rounded-xl hover:bg-primary-dark">
+                    Submit Answer
+                </button>
+            </div>
+            <div id="spelling-hint" class="mt-4 text-center text-gray-500 hidden"></div>
+        `;
+    };
+
+    window.checkSpelling = () => {
+        if (!gameActive) return;
+
+        const inputEl = document.getElementById('spelling-input');
+        const hintEl = document.getElementById('spelling-hint');
+        const submitBtn = document.getElementById('spell-submit');
+        
+        const userAnswer = inputEl.value.trim().toLowerCase();
+        const correctAnswer = currentWord.malay.trim().toLowerCase();
+
+        inputEl.disabled = true;
+        submitBtn.disabled = true;
+
+        if (userAnswer === correctAnswer) {
+            inputEl.classList.add('border-success', 'ring-4', 'ring-success/50');
+            processAnswer(true);
+        } else {
+            inputEl.classList.add('border-error', 'ring-4', 'ring-error/50');
+            hintEl.textContent = `The correct spelling was: "${currentWord.malay}"`;
+            hintEl.classList.remove('hidden');
+            processAnswer(false);
+        }
+        
+        submitBtn.classList.add('hidden');
+    };
+
+    // --- Initialization ---
+    window.onload = loadVocabulary;
+
+</script>
+</body>
+</html>
