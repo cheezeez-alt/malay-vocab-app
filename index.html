@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Malay Vocab Revision</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        'primary': '#4F46E5', // Indigo 600
+                        'primary-dark': '#4338CA', // Indigo 700
+                        'success': '#10B981', // Emerald 500
+                        'error': '#EF4444', // Red 500
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom CSS for visual polish */
+        .card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center p-4">
+
+<div id="app" class="w-full max-w-2xl">
+    <h1 class="text-4xl font-extrabold text-center text-gray-900 mb-6">Malay Vocab Builder</h1>
+
+    <!-- Loading/Error Message -->
+    <div id="message" class="card bg-white p-6 rounded-xl text-center text-lg text-gray-600 mb-6">Loading vocabulary...</div>
+
+    <!-- Navigation/Mode Selection -->
+    <div id="game-controls" class="flex justify-center space-x-4 mb-8 hidden">
+        <button onclick="startGame('mc')" class="btn-primary bg-primary text-white font-semibold py-3 px-6 rounded-xl hover:bg-primary-dark">
+            1. Multiple Choice (Meaning)
+        </button>
+        <button onclick="startGame('match')" class="btn-primary bg-primary text-white font-semibold py-3 px-6 rounded-xl hover:bg-primary-dark">
+            2. Matching (Synonym/Antonym)
+        </button>
+        <button onclick="startGame('spell')" class="btn-primary bg-primary text-white font-semibold py-3 px-6 rounded-xl hover:bg-primary-dark">
+            3. Spelling Test
+        </button>
+    </div>
+
+    <!-- Game Area -->
+    <div id="game-area" class="card bg-white p-6 md:p-10 rounded-xl hidden">
+        <div id="game-container">
+            <!-- Game specific content will be rendered here -->
+        </div>
+
+        <div id="result-message" class="mt-6 text-center text-xl font-bold hidden"></div>
+
+        <!-- Continue Button -->
+        <div class="flex justify-center mt-6">
+            <button id="next-button" onclick="nextWord()" class="btn-primary bg-success text-white font-semibold py-3 px-8 rounded-xl hidden">
+                Next Word
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- Configuration ---
+    // STEP 1: Replace the following URL with your sheet's CSV export link.
+    // To get this link, take your sheet ID (1xZwDrLKdhGFjo2yxHelIYn9bRhKynCM6OAIW5VEW44A) and use this format:
+    // https://docs.google.com/spreadsheets/d/{YOUR_SHEET_ID}/export?format=csv&gid={YOUR_SHEET_GID}
+    // GID is typically '0' for the first sheet.
+    const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/1xZwDrLKdhGFjo2yxHelIYn9bRhKynCM6OAIW5VEW44A/gviz/tq?tqx=out:csv&gid=0';
+
+    // STEP 3: Replace the following URL with your Google Apps Script Web App URL.
+    // This is required to write back to Columns E and F.
+    const GAS_ENDPOINT_URL = 'https://script.google.com/macros/s/AKfycbzxw7gIaFyQmzhMNUSWsHQf8GdGlVIccVuXl_JvDDw/dev'; 
+    const MAX_RETRIES = 3;
+    const INITIAL_DELAY_MS = 1000;
+
+    // --- Global State ---
+    let vocabulary = [];
+    let currentWordIndex = 0;
+    let currentWord = null;
+    let currentMode = null;
+    let gameActive = false;
+    let isCorrect = false;
+
+    // --- DOM Elements ---
+    const messageEl = document.getElementById('message');
+    const controlsEl = document.getElementById('game-controls');
+    const gameAreaEl = document.getElementById('game-area');
+    const gameContainerEl = document.getElementById('game-container');
+    const resultMessageEl = document.getElementById('result-message');
+    const nextButtonEl = document.getElementById('next-button');
+
+    // --- Utility Functions ---
+
+    // Simple shuffle function
+    const shuffleArray = (array) => {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+    };
+
+    // A simple CSV parser (handles commas within quotes but assumes no complex line breaks)
+    const parseCSV = (csv) => {
+        const lines = csv.split('\n').filter(line => line.trim() !== '');
+        if (lines.length < 2) return [];
+
+        const header = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+        const data = [];
+
+        for (let i = 1; i < lines.length; i++) {
+            // Regex to split by comma, respecting commas inside double quotes
+            // This is a robust way to handle quoted fields in CSV.
+            const values = lines[i].match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g)?.map(v => v.trim().replace(/^"|"$/g, '')) || [];
+            
+            if (values.length === header.length) {
+                const row = {};
+                row.malay = values[0];
+                row.meaning = values[1];
+                row.synonym = values[2];
+                row.antonym = values[3];
+                row.lastPractice = values[4]; // Column E
+                row.correctness = values[5]; // Column F
+                row.rowNumber = i + 1; // 1-based index for sheet row
+                
+                // Only include rows where the Malay word is not empty
+                if (row.malay.trim() !== "") {
+                    data.push(row);
+                }
+            }
+        }
+        return data;
+    };
+
+    // --- Data Loading with Retry Logic ---
+
+    const loadVocabulary = async () => {
+        messageEl.textContent = 'Fetching word list from Google Sheet...';
+        
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                const response = await fetch(SHEET_CSV_URL);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const csvText = await response.text();
+                vocabulary = parseCSV(csvText);
+
+                if (vocabulary.length === 0) {
+                    messageEl.textContent = 'Error: No valid vocabulary found. Check your sheet content or link.';
+                    return;
+                }
+
+                // Shuffle the vocabulary once for a new revision session
+                vocabulary = shuffleArray(vocabulary);
+                currentWordIndex = 0;
+                currentWord = vocabulary[currentWordIndex];
+
+                messageEl.classList.add('hidden');
+                controlsEl.classList.remove('hidden');
+                gameAreaEl.classList.add('hidden');
+                // The loading message is hidden, but this text is logged to console for confirmation
+                console.log(`Successfully loaded ${vocabulary.length} words on attempt ${attempt}.`); 
+                return; // Success, exit the function
+
+            } catch (error) {
+                console.warn(`Attempt ${attempt} failed: ${error.message}`);
+                
+                if (attempt === MAX_RETRIES) {
+                    // Last attempt failed, show final error message
+                    console.error("Failed to load vocabulary after all retries.");
+                    messageEl.textContent = `Failed to load vocabulary after ${MAX_RETRIES} attempts. This is usually due to incorrect URL format or sheet access. Please ensure: 
+                    1. The URL in STEP 1 uses the '.../export?format=csv&gid=...' structure.
+                    2. The Google Sheet is shared as "Anyone with the link (Viewer)".`;
+                    return;
+                }
+                
+                // Wait before retrying (exponential backoff)
+                const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
+                messageEl.textContent = `Error loading. Retrying in ${delay / 1000}s... (Attempt ${attempt + 1}/${MAX_RETRIES})`;
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    };
+
+    // --- Game Flow Control ---
+
+    const startGame = (mode) => {
+        currentMode = mode;
+        currentWordIndex = 0;
+        vocabulary = shuffleArray(vocabulary); // Reshuffle for a fresh start
+        gameAreaEl.classList.remove('hidden');
+        controlsEl.classList.add('hidden');
+        resultMessageEl.classList.add('hidden');
+        nextButtonEl.classList.add('hidden');
+        gameActive = true;
+        loadQuestion();
+    };
+
+    const loadQuestion = () => {
+        if (currentWordIndex >= vocabulary.length) {
+            gameContainerEl.innerHTML = `
+                <h2 class="text-2xl font-bold text-primary mb-4">Session Complete!</h2>
+                <p>You have finished practicing all ${vocabulary.length} words. Great job!</p>
+            `;
+            controlsEl.classList.remove('hidden');
+            nextButtonEl.classList.add('hidden');
+            return;
+        }
+
+        currentWord = vocabulary[currentWordIndex];
+        resultMessageEl.classList.add('hidden');
+        nextButtonEl.classList.add('hidden');
+        gameActive = true;
+        isCorrect = false;
+
+        gameContainerEl.innerHTML = ''; // Clear previous content
+
+        switch (currentMode) {
+            case 'mc':
+                renderMultipleChoice();
+                break;
+            case 'match':
+                renderMatchingQuiz();
+                break;
+            case 'spell':
+                renderSpellingTest();
+                break;
+        }
+    };
+
+    const nextWord = () => {
+        currentWordIndex++;
+        loadQuestion();
+    };
+
+    // Called when an answer is submitted/selected
+    const processAnswer = async (correct) => {
+        if (!gameActive) return;
+
+        gameActive = false;
+        isCorrect = correct;
+        
+        resultMessageEl.textContent = correct ? '✅ Correct! Well done.' : '❌ Incorrect. Keep practicing!';
+        resultMessageEl.classList.remove('hidden');
+        resultMessageEl.classList.remove(correct ? 'text-error' : 'text-success');
+        resultMessageEl.classList.add(correct ? 'text-success' : 'text-error');
+        nextButtonEl.classList.remove('hidden');
+        
+        await updateSheet(currentWord.rowNumber, correct);
+    };
+
+    // --- Sheet Write Function (Updates Columns E and F) ---
+
+    const updateSheet = async (rowNumber, correct) => {
+        if (GAS_ENDPOINT_URL.includes('YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE')) {
+            console.warn("Sheet update skipped. Please complete Step 3 and replace 'YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE' to enable write-back functionality.");
+            return;
+        }
+
+        const data = {
+            row: rowNumber,
+            isCorrect: correct,
+            timestamp: new Date().toISOString(),
+            sheetId: '1xZwDrLKdhGFjo2yxHelIYn9bRhKynCM6OAIW5VEW44A' // Your Sheet ID
+        };
+
+        try {
+            // Exponential backoff for GAS endpoint request
+            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                const response = await fetch(GAS_ENDPOINT_URL, {
+                    method: 'POST',
+                    mode: 'no-cors', // Required for Google Apps Script POST
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                // Due to 'no-cors' mode, we can't reliably check response.ok, 
+                // but we assume success if the fetch operation completes without throwing an error
+                console.log(`Update request sent for row ${rowNumber} on attempt ${attempt}.`);
+                return; // Success, exit the function
+            }
+            
+        } catch (error) {
+            console.error("Failed to send update to Google Sheet after all retries:", error);
+        }
+    };
+
+    // --- Game 1: Multiple Choice (Meaning) ---
+
+    const renderMultipleChoice = () => {
+        const word = currentWord.malay;
+        const correctAnswer = currentWord.meaning;
+
+        // Get 3 random distractors
+        const distractors = shuffleArray(vocabulary
+            .filter(w => w.malay !== word)
+            .map(w => w.meaning))
+            .slice(0, 3);
+
+        const options = shuffleArray([correctAnswer, ...distractors]);
+
+        const optionHtml = options.map((opt, index) => `
+            <button onclick="checkMultipleChoice('${opt.replace(/'/g, "\\'")}', '${correctAnswer.replace(/'/g, "\\'")}')" 
+                    id="mc-option-${index}"
+                    class="mc-option w-full text-left p-4 my-2 border border-gray-200 rounded-xl bg-gray-50 hover:bg-primary hover:text-white transition duration-200 focus:outline-none focus:ring-4 focus:ring-primary-dark focus:ring-opacity-50">
+                ${opt}
+            </button>
+        `).join('');
+
+        gameContainerEl.innerHTML = `
+            <h2 class="text-3xl font-bold text-center text-primary-dark mb-8">What is the meaning of: <span class="text-primary">${word}</span>?</h2>
+            <div id="mc-options">
+                ${optionHtml}
+            </div>
+        `;
+    };
+
+    window.checkMultipleChoice = (selected, correct) => {
+        if (!gameActive) return;
+
+        const allButtons = document.querySelectorAll('.mc-option');
+        allButtons.forEach(btn => {
+            btn.disabled = true;
+            // Need to clean the text content for comparison as it might contain extra spaces/newlines
+            const btnText = btn.textContent.trim().replace(/'/g, "\\'");
+            
+            if (btnText === correct.trim().replace(/'/g, "\\'")) {
+                btn.classList.replace('bg-gray-50', 'bg-success');
+                btn.classList.add('text-white');
+                btn.classList.remove('hover:bg-primary');
+            } else if (btnText === selected.trim().replace(/'/g, "\\'")) {
+                btn.classList.replace('bg-gray-50', 'bg-error');
+                btn.classList.add('text-white');
+                btn.classList.remove('hover:bg-primary');
+            }
+        });
+
+        processAnswer(selected.trim() === correct.trim());
+    };
+
+    // --- Game 2: Matching Quiz (Synonym/Antonym) ---
+
+    const renderMatchingQuiz = () => {
+        // Only use words that have non-empty synonym OR antonym fields
+        const availableWords = vocabulary.filter(w => w.synonym.trim() !== "" || w.antonym.trim() !== "");
+        
+        // Use 4 words total for matching (1 current + 3 distractors)
+        // Ensure the current word is in the matched set
+        let matchedWords = [currentWord];
+        const distractors = shuffleArray(availableWords.filter(w => w.rowNumber !== currentWord.rowNumber)).slice(0, 3);
+        matchedWords = shuffleArray([...matchedWords, ...distractors]);
+
+        const useAntonym = currentWord.antonym.trim() !== "" && (currentWord.synonym.trim() === "" || Math.random() < 0.5);
+        const targetType = useAntonym ? 'Antonym' : 'Synonym';
+        
+        // Helper function to get the target term (Synonym or Antonym)
+        const getTargetTerm = (word) => {
+            const val = useAntonym ? word.antonym : word.synonym;
+            // If the target (synonym/antonym) is empty, fall back to meaning
+            return val.trim() !== "" ? val : word.meaning;
+        };
+        
+        // Create the two columns of terms to be matched
+        const leftTerms = matchedWords.map(w => ({ term: w.malay, id: w.rowNumber }));
+        const rightTerms = matchedWords.map(w => ({ term: getTargetTerm(w), id: w.rowNumber }));
+
+        // Shuffle the right column
+        shuffleArray(rightTerms);
+
+        gameContainerEl.innerHTML = `
+            <h2 class="text-3xl font-bold text-center text-primary-dark mb-8">Match the Malay word with its ${targetType}.</h2>
+            <div id="match-game" class="flex justify-between space-x-4">
+                <div id="left-column" class="flex flex-col w-1/2"></div>
+                <div id="right-column" class="flex flex-col w-1/2"></div>
+            </div>
+        `;
+        
+        const leftColEl = document.getElementById('left-column');
+        const rightColEl = document.getElementById('right-column');
+
+        leftTerms.forEach(item => {
+            leftColEl.innerHTML += `<button id="left-${item.id}" data-id="${item.id}" data-type="left" onclick="selectMatch(this)" class="match-btn left-btn p-3 my-2 border border-gray-300 rounded-xl bg-gray-50 hover:bg-primary/20 transition duration-150">${item.term}</button>`;
+        });
+
+        rightTerms.forEach(item => {
+            rightColEl.innerHTML += `<button id="right-${item.id}" data-id="${item.id}" data-type="right" onclick="selectMatch(this)" class="match-btn right-btn p-3 my-2 border border-gray-300 rounded-xl bg-gray-50 hover:bg-primary/20 transition duration-150">${item.term}</button>`;
+        });
+        
+        // Highlight the current word to focus the user
+        document.getElementById(`left-${currentWord.rowNumber}`).classList.remove('bg-gray-50');
+        document.getElementById(`left-${currentWord.rowNumber}`).classList.add('bg-primary', 'text-white', 'font-bold', 'ring-2', 'ring-primary-dark');
+    };
+    
+    let selectedRight = null;
+    window.selectMatch = (button) => {
+        if (!gameActive) return;
+
+        const id = button.getAttribute('data-id');
+        const type = button.getAttribute('data-type');
+        
+        if (type === 'right') {
+            document.querySelectorAll('.right-btn').forEach(btn => btn.classList.remove('bg-yellow-200'));
+            button.classList.add('bg-yellow-200');
+            selectedRight = id;
+
+            // Check if the current word has been matched
+            if (id == currentWord.rowNumber) {
+                // Correct match for the current focus word!
+                button.classList.remove('bg-yellow-200', 'hover:bg-primary/20');
+                button.classList.add('bg-success', 'text-white');
+                document.getElementById(`left-${currentWord.rowNumber}`).classList.remove('bg-primary', 'text-white');
+                document.getElementById(`left-${currentWord.rowNumber}`).classList.add('bg-success', 'text-white');
+                document.querySelectorAll('.match-btn').forEach(btn => btn.disabled = true);
+                processAnswer(true);
+            } else if (selectedRight !== null) {
+                // The user selected a distractor match.
+                button.classList.remove('bg-yellow-200', 'hover:bg-primary/20');
+                button.classList.add('bg-error', 'text-white');
+                document.querySelectorAll('.match-btn').forEach(btn => btn.disabled = true);
+                
+                // Highlight the correct match in success color
+                const correctRightBtn = document.getElementById(`right-${currentWord.rowNumber}`);
+                if(correctRightBtn) {
+                     correctRightBtn.classList.remove('bg-yellow-200', 'hover:bg-primary/20');
+                     correctRightBtn.classList.add('bg-success', 'text-white');
+                }
+                processAnswer(false);
+            }
+        }
+    };
+
+
+    // --- Game 3: Spelling Test ---
+
+    const renderSpellingTest = () => {
+        const meaning = currentWord.meaning;
+        let promptHtml = `Spell the Malay word that means: <span class="text-primary">"${meaning}"</span>`;
+        let hintText = '';
+
+        // Add context to the prompt if synonym or antonym is available to resolve ambiguity
+        if (currentWord.synonym.trim() !== "") {
+            hintText += `Synonym: ${currentWord.synonym}. `;
+        }
+        if (currentWord.antonym.trim() !== "") {
+            hintText += `Antonym: ${currentWord.antonym}.`;
+        }
+        
+        // If we have any context, append it to the main prompt for clarity
+        if (hintText.trim() !== "") {
+             promptHtml += `<div class="text-base font-medium text-gray-500 mt-2">Context: ${hintText.trim()}</div>`;
+        }
+
+        gameContainerEl.innerHTML = `
+            <h2 class="text-3xl font-bold text-center text-primary-dark mb-8">${promptHtml}</h2>
+            <div class="flex flex-col items-center space-y-4">
+                <input type="text" id="spelling-input" 
+                       class="w-full md:w-2/3 p-4 text-xl border-2 border-gray-300 rounded-xl focus:border-primary focus:ring-primary transition duration-150" 
+                       placeholder="Type the Malay word here"
+                       onkeydown="if(event.key === 'Enter') checkSpelling()">
+                <button onclick="checkSpelling()" id="spell-submit" class="btn-primary bg-primary text-white font-semibold py-3 px-8 rounded-xl hover:bg-primary-dark">
+                    Submit Answer
+                </button>
+            </div>
+            <div id="spelling-hint" class="mt-4 text-center text-gray-500 hidden"></div>
+        `;
+    };
+
+    window.checkSpelling = () => {
+        if (!gameActive) return;
+
+        const inputEl = document.getElementById('spelling-input');
+        const hintEl = document.getElementById('spelling-hint');
+        const submitBtn = document.getElementById('spell-submit');
+        
+        const userAnswer = inputEl.value.trim().toLowerCase();
+        const correctAnswer = currentWord.malay.trim().toLowerCase();
+
+        inputEl.disabled = true;
+        submitBtn.disabled = true;
+
+        if (userAnswer === correctAnswer) {
+            inputEl.classList.add('border-success', 'ring-4', 'ring-success/50');
+            processAnswer(true);
+        } else {
+            inputEl.classList.add('border-error', 'ring-4', 'ring-error/50');
+            hintEl.textContent = `The correct spelling was: "${currentWord.malay}"`;
+            hintEl.classList.remove('hidden');
+            processAnswer(false);
+        }
+    };
+
+    // --- Initialization ---
+    window.onload = loadVocabulary;
+
+</script>
+</body>
+</html>
