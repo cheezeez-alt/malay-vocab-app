@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Malay Vocab Trainer - 多模式学习</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        'primary': '#4F46E5', // Indigo 600
+                        'primary-dark': '#4338CA', // Indigo 700
+                        'success': '#10B981', // Emerald 500
+                        'error': '#EF4444', // Red 500
+                        'gold': '#FFD700', // Gold for coins
+                        'accent': '#F97316', // Orange 500
+                        'background': '#F9FAFB', // Light Gray background
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom CSS for visual polish and theming */
+        .card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+        }
+        .btn-primary, .btn-secondary, .btn-game-option {
+            transition: background-color 0.15s, transform 0.1s;
+        }
+        .btn-primary:active, .btn-secondary:active, .btn-game-option:active {
+            transform: scale(0.98);
+        }
+        .match-item {
+            cursor: pointer;
+            user-select: none;
+        }
+        .match-item.selected {
+            border-color: #4F46E5;
+            background-color: #EEF2FF;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.5);
+        }
+        .match-item.correct {
+            border-color: #10B981;
+            background-color: #D1FAE5;
+        }
+        .match-item.incorrect {
+            border-color: #EF4444;
+            background-color: #FEE2E2;
+        }
+        /* Mobile adjustment for better fit */
+        @media (max-width: 640px) {
+            .container {
+                padding: 1rem;
+            }
+            .card {
+                padding: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body class="bg-background min-h-screen flex flex-col items-center justify-center p-4 font-sans">
+
+    <!-- Global State -->
+    <script>
+        // --- Configuration & Global Variables ---
+        // 🚨 关键：请将此占位符替换为您 Google Apps Script Web 应用的实际 URL！
+        const API_URL = "https://script.google.com/macros/s/AKfycbwO0rYYI-_nCboMLykmCh4MXdx3Ykvm1jglYd--I46mpZfMcJwt-agorA1fN75Zecd_/exec"; 
+        const COINS_PER_CORRECT_ANSWER = 5;
+        const MIN_EASE_FACTOR = 1.3;
+        const OPTIONS_COUNT = 4; // Number of options for MC
+        
+        let allWords = [];
+        let revisionList = [];
+        let currentWord = null;
+        let wordIndex = 0;
+        let coins = 0;
+        let totalFails = 0;
+        let gameMode = null; // 'mc', 'match', or 'spell'
+        let gameActive = false;
+        let isLoading = false;
+        let appInitialized = false;
+
+        // Matching Game State
+        let leftSelected = null;
+        let rightSelected = null;
+        let matchPairs = [];
+        let matchedCount = 0;
+
+        // --- Utility Functions ---
+
+        /**
+         * Shuffles an array in place (Fisher-Yates algorithm).
+         * @param {Array} a The array to shuffle.
+         */
+        const shuffleArray = (a) => {
+            for (let i = a.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [a[i], a[j]] = [a[j], a[i]];
+            }
+            return a;
+        };
+
+        /**
+         * Calculates the next practice interval based on SM-2 algorithm.
+         */
+        const calculateSM2 = (n, ef, i, status) => {
+            let q = status === 'Correct' ? 5 : 1;
+            
+            let newN = n;
+            let newEF = ef;
+            let newI = i;
+
+            if (q >= 3) {
+                newN = n + 1;
+                newEF = ef + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02));
+                newEF = Math.max(newEF, MIN_EASE_FACTOR);
+                
+                if (newN === 1) {
+                    newI = 1;
+                } else if (newN === 2) {
+                    newI = 6;
+                } else {
+                    newI = Math.round(i * newEF);
+                }
+                
+                return { sr_n: newN, sr_ef: newEF, sr_i: newI, status: 'Correct' };
+
+            } else {
+                newN = 0;
+                newI = 1;
+                return { sr_n: newN, sr_ef: newEF, sr_i: newI, status: status };
+            }
+        };
+
+        /**
+         * Checks if a word is due for revision in the current mode.
+         */
+        const isDueForRevision = (word) => {
+            const metrics = word[gameMode];
+            if (!metrics) return false;
+
+            // Simplified check: if next_practice is not null, check the date. Otherwise, it's due.
+            if (!word.next_practice) return true; 
+
+            try {
+                const nextPracticeDate = new Date(word.next_practice);
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                nextPracticeDate.setHours(0, 0, 0, 0);
+
+                return nextPracticeDate <= today;
+            } catch (e) {
+                return true; 
+            }
+        };
+
+        /**
+         * Calls the Google Apps Script Web App with exponential backoff for retries.
+         */
+        async function apiCall(data, retries = 3) {
+            const formData = new URLSearchParams(data);
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: formData.toString(),
+                    });
+                    
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    const result = await response.json();
+                    if (result.status === 'error') throw new Error(`API Error: ${result.message}`);
+                    return result;
+                } catch (error) {
+                    console.error(`Attempt ${i + 1} failed:`, error);
+                    if (i === retries - 1) throw new Error("Failed to connect to backend service after multiple retries.");
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+        
+        async function updateCoinsInSheet(newCoins) {
+            try {
+                await apiCall({ action: 'updateCoins', newCoins: newCoins });
+            } catch (error) {
+                console.error("Failed to update coins in sheet:", error);
+            }
+        }
+
+        async function updateProgressInSheet(word, metrics) {
+            const { sr_n, sr_ef, sr_i, status } = metrics;
+
+            try {
+                await apiCall({
+                    action: 'updateProgress',
+                    row: word.row,
+                    sr_n: sr_n,
+                    sr_ef: sr_ef,
+                    sr_i: sr_i,
+                    status: status, 
+                    mode: gameMode // Pass the current game mode
+                });
+            } catch (error) {
+                console.error(`Failed to update progress for row ${word.row}:`, error);
+            }
+        }
+
+
+        // --- Game Logic Flow ---
+
+        const updateUIElements = () => {
+            document.getElementById('coin-count').textContent = coins;
+            document.getElementById('fail-count').textContent = totalFails;
+            
+            const totalWords = revisionList.length;
+            const progressEl = document.getElementById('progress-indicator');
+            const modeEl = document.getElementById('mode-indicator');
+            
+            let modeName = '';
+            if (gameMode === 'mc') modeName = '多项选择 (MC)';
+            else if (gameMode === 'match') modeName = '配对 (Matching)';
+            else if (gameMode === 'spell') modeName = '拼写 (Spelling)';
+            modeEl.textContent = modeName;
+
+            if (totalWords > 0) {
+                const completed = wordIndex;
+                const remaining = totalWords - completed;
+                progressEl.textContent = `进度: ${completed} / ${totalWords} (${remaining} 剩余)`;
+            } else {
+                progressEl.textContent = "进度: 0 / 0";
+            }
+        };
+        
+        const renderGame = () => {
+            const gameContainer = document.getElementById('game-container');
+            
+            if (!currentWord || wordIndex >= revisionList.length) {
+                gameContainer.innerHTML = `
+                    <div class="text-center p-8">
+                        <h2 class="text-3xl font-bold ${revisionList.length > 0 ? 'text-success' : 'text-primary'} mb-4">${revisionList.length > 0 ? '本轮复习完成! 🎉' : '今日无词汇待复习。'}</h2>
+                        <p class="text-gray-600 mb-6">${revisionList.length > 0 ? '您已完成所有到期词汇。' : '请检查您的词汇表或明天再来。'}</p>
+                        <div class="bg-gray-50 p-4 rounded-xl shadow-inner inline-block">
+                             <p class="text-lg font-semibold">总金币: <span class="text-gold">${coins}</span></p>
+                             <p class="text-lg font-semibold">总失败次数: <span class="text-error">${totalFails}</span></p>
+                        </div>
+                        <button onclick="showModeSelection()" class="mt-8 btn-primary bg-primary text-white font-semibold py-3 px-8 rounded-xl hover:bg-primary-dark">
+                            选择新模式
+                        </button>
+                    </div>
+                `;
+                gameActive = false;
+                return;
+            }
+
+            // Route to the specific game renderer
+            if (gameMode === 'mc') renderMCGame(gameContainer);
+            else if (gameMode === 'match') renderMatchingGame(gameContainer);
+            else if (gameMode === 'spell') renderSpellingGame(gameContainer);
+
+            updateUIElements();
+        };
+
+        const getSM2MetricsHTML = (metrics) => {
+             return `<p class="text-lg text-gray-500 italic mb-8">
+                        N: ${metrics.sr_n} | EF: ${metrics.sr_ef.toFixed(2)} | I: ${metrics.sr_i} 天
+                    </p>`;
+        }
+        
+        const startGame = (mode) => {
+            if (isLoading) return;
+            gameMode = mode;
+            wordIndex = 0;
+
+            // 1. Filter and shuffle the revision list for the selected mode
+            revisionList = allWords.filter(word => {
+                // Ensure the word has a Malay word and required elements for the mode
+                if (!word.word_malay) return false;
+
+                if (gameMode === 'mc' && !word.meaning_chinese) return false;
+                if (gameMode === 'match' && (!word.synonym && !word.antonym)) return false;
+                if (gameMode === 'spell' && (!word.meaning_chinese && !word.synonym && !word.antonym)) return false;
+
+                // Check if the word is due based on the current mode's metrics (or global next_practice)
+                return isDueForRevision(word);
+            });
+            
+            shuffleArray(revisionList);
+            
+            const statusEl = document.getElementById('loading-status');
+            if (statusEl) statusEl.textContent = `已加载 ${allWords.length} 个词汇。${revisionList.length} 个词汇待复习。开始 ${gameMode} 模式...`;
+
+            if (revisionList.length === 0) {
+                 renderGame(); // Show "No Words Due" screen
+                 return;
+            }
+
+            gameActive = true;
+            currentWord = revisionList[wordIndex];
+            renderGame();
+        };
+
+        // --- Core Answer Processing ---
+
+        const processAnswer = (isCorrect, status) => {
+            gameActive = false; 
+
+            const oldMetrics = currentWord[gameMode];
+            const newMetrics = calculateSM2(oldMetrics.sr_n, oldMetrics.sr_ef, oldMetrics.sr_i, status);
+            
+            if (isCorrect) {
+                coins += COINS_PER_CORRECT_ANSWER;
+                const coinEl = document.getElementById('coin-count');
+                coinEl.classList.add('text-success', 'scale-125', 'font-extrabold', 'transition-all', 'duration-300');
+                setTimeout(() => {
+                    coinEl.classList.remove('text-success', 'scale-125', 'font-extrabold');
+                }, 500);
+            } else {
+                totalFails += 1;
+            }
+
+            // Update local and backend
+            currentWord[gameMode] = newMetrics;
+            updateProgressInSheet(currentWord, newMetrics);
+            updateCoinsInSheet(coins); 
+
+            // Prepare for Next Word
+            document.getElementById('in-game-skip').disabled = true;
+            document.getElementById('in-game-show').disabled = true;
+            
+            // Show details after submission
+            const wordInfo = `<div class="mt-4 p-3 bg-gray-50 rounded-xl text-sm border border-gray-200">
+                <p><strong>中文含义:</strong> ${currentWord.meaning_chinese || 'N/A'}</p>
+                <p><strong>同义词:</strong> ${currentWord.synonym || 'N/A'}</p>
+                <p><strong>反义词:</strong> ${currentWord.antonym || 'N/A'}</p>
+            </div>`;
+            document.getElementById('feedback-area').insertAdjacentHTML('beforeend', wordInfo);
+
+
+            setTimeout(() => {
+                wordIndex++;
+                renderGame();
+            }, 3000); 
+        };
+        
+        // --- Mode Selection Screen ---
+
+        window.showModeSelection = () => {
+            gameMode = null;
+            wordIndex = 0;
+            revisionList = [];
+            document.getElementById('mode-indicator').textContent = '选择模式';
+            document.getElementById('progress-indicator').textContent = '进度: 0 / 0';
+            
+            const gameContainer = document.getElementById('game-container');
+            gameContainer.innerHTML = `
+                <div class="text-center p-8 w-full">
+                    <h2 class="text-3xl font-bold text-primary-dark mb-6">选择复习模式</h2>
+                    <p class="text-gray-600 mb-8">选择您今天想要练习的词汇技能。</p>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <!-- Multiple Choice -->
+                        <div class="card bg-white p-6 rounded-2xl shadow-xl hover:shadow-2xl hover:border-primary border-2 border-transparent transition-all cursor-pointer" onclick="startGame('mc')">
+                            <h3 class="text-xl font-bold text-primary mb-2">多项选择</h3>
+                            <p class="text-sm text-gray-500 mb-4">马来语单词 → 中文含义</p>
+                            <p class="text-xs text-gray-400">测试列 A, B (使用 G, H, I 指标)</p>
+                            <button class="mt-4 btn-secondary bg-primary/10 text-primary font-semibold py-2 px-4 rounded-xl hover:bg-primary/20">开始</button>
+                        </div>
+
+                        <!-- Matching -->
+                        <div class="card bg-white p-6 rounded-2xl shadow-xl hover:shadow-2xl hover:border-accent border-2 border-transparent transition-all cursor-pointer" onclick="startGame('match')">
+                            <h3 class="text-xl font-bold text-accent mb-2">配对</h3>
+                            <p class="text-sm text-gray-500 mb-4">马来语单词 ↔ 同义词/反义词</p>
+                            <p class="text-xs text-gray-400">测试列 A, C, D (使用 J, K, L 指标)</p>
+                            <button class="mt-4 btn-secondary bg-accent/10 text-accent font-semibold py-2 px-4 rounded-xl hover:bg-accent/20">开始</button>
+                        </div>
+
+                        <!-- Spelling -->
+                        <div class="card bg-white p-6 rounded-2xl shadow-xl hover:shadow-2xl hover:border-success border-2 border-transparent transition-all cursor-pointer" onclick="startGame('spell')">
+                            <h3 class="text-xl font-bold text-success mb-2">拼写</h3>
+                            <p class="text-sm text-gray-500 mb-4">含义/同义词/反义词 → 马来语单词</p>
+                            <p class="text-xs text-gray-400">测试列 B, C, D, A (使用 M, N, O 指标)</p>
+                            <button class="mt-4 btn-secondary bg-success/10 text-success font-semibold py-2 px-4 rounded-xl hover:bg-success/20">开始</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            updateUIElements();
+        }
+
+        // --- 3. Multiple Choice (MC) Game ---
+
+        const renderMCGame = (container) => {
+            const metrics = currentWord.mc;
+            const options = getMCOptions(currentWord);
+
+            container.innerHTML = `
+                <div class="text-center mb-6">
+                    <p class="text-sm font-medium text-gray-500 uppercase tracking-wider">选择正确的中文含义</p>
+                </div>
+                
+                <div class="card bg-white p-6 md:p-10 rounded-2xl shadow-xl w-full max-w-lg mx-auto border-4 border-primary/10">
+                    <h1 class="text-4xl md:text-5xl font-extrabold text-primary-dark mb-3">${currentWord.word_malay}</h1>
+                    ${getSM2MetricsHTML(metrics)}
+                    <div id="feedback-area" class="mb-6"></div>
+
+                    <div id="options-container" class="grid grid-cols-1 gap-4">
+                        ${options.map((opt, index) => `
+                            <button onclick="checkMCOption(this, '${opt.isCorrect}')" 
+                                    class="btn-game-option bg-gray-100 text-gray-800 font-medium py-3 px-4 rounded-xl text-lg hover:bg-gray-200 text-left">
+                                ${index + 1}. ${opt.text}
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+                ${getInGameControls()}
+            `;
+        };
+
+        const getMCOptions = (correctWord) => {
+            const correctAnswer = correctWord.meaning_chinese;
+            const correctOption = { text: correctAnswer, isCorrect: true };
+            
+            // Get non-correct Chinese meanings for distractors
+            const distractors = allWords
+                .filter(w => w.row !== correctWord.row && w.meaning_chinese && w.meaning_chinese !== correctAnswer)
+                .map(w => w.meaning_chinese);
+
+            // Select (OPTIONS_COUNT - 1) random distractors
+            shuffleArray(distractors);
+            const selectedDistractors = distractors.slice(0, OPTIONS_COUNT - 1).map(text => ({ text, isCorrect: false }));
+            
+            // If we don't have enough distractors, just fill with the correct answer multiple times (shouldn't happen often)
+            while (selectedDistractors.length < OPTIONS_COUNT - 1) {
+                selectedDistractors.push({ text: `[N/A]`, isCorrect: false });
+            }
+
+            const options = shuffleArray([...selectedDistractors, correctOption]);
+            return options;
+        }
+
+        window.checkMCOption = (button, isCorrectString) => {
+            if (!gameActive) return;
+            gameActive = false;
+
+            const isCorrect = isCorrectString === 'true';
+            const buttons = document.querySelectorAll('#options-container button');
+            buttons.forEach(btn => btn.disabled = true);
+
+            const feedbackArea = document.getElementById('feedback-area');
+
+            if (isCorrect) {
+                button.classList.remove('bg-gray-100', 'hover:bg-gray-200');
+                button.classList.add('bg-success', 'text-white', 'font-bold');
+                feedbackArea.innerHTML = `<p class="text-success font-bold text-center">正确! 🎉</p>`;
+            } else {
+                button.classList.remove('bg-gray-100', 'hover:bg-gray-200');
+                button.classList.add('bg-error', 'text-white', 'font-bold');
+                feedbackArea.innerHTML = `<p class="text-error font-bold text-center">错误. 正确答案是: ${currentWord.meaning_chinese}</p>`;
+                
+                // Highlight the correct answer
+                buttons.forEach(btn => {
+                    if (btn.onclick.toString().includes("'true'")) {
+                        btn.classList.add('bg-success/50', 'border-2', 'border-success');
+                    }
+                });
+            }
+
+            processAnswer(isCorrect, isCorrect ? 'Correct' : 'Wrong');
+        };
+        
+        // --- 4. Matching Game ---
+        
+        const renderMatchingGame = (container) => {
+            const metrics = currentWord.match;
+            
+            // 1. Determine matching pair
+            let matchItem = '';
+            let matchType = '';
+            
+            const hasSynonym = !!currentWord.synonym;
+            const hasAntonym = !!currentWord.antonym;
+
+            if (hasSynonym && hasAntonym) {
+                if (Math.random() < 0.5) {
+                    matchItem = currentWord.synonym;
+                    matchType = '同义词';
+                } else {
+                    matchItem = currentWord.antonym;
+                    matchType = '反义词';
+                }
+            } else if (hasSynonym) {
+                 matchItem = currentWord.synonym;
+                 matchType = '同义词';
+            } else if (hasAntonym) {
+                 matchItem = currentWord.antonym;
+                 matchType = '反义词';
+            } else {
+                // Should be filtered out by startGame, but as a fallback:
+                container.innerHTML = `<div class="text-error p-8">此词汇没有同义词或反义词可供配对。</div>`;
+                processAnswer(false, 'Skipped');
+                return;
+            }
+            
+            matchPairs = [];
+            matchPairs.push({ id: 'L1', text: currentWord.word_malay, type: 'malay' });
+            matchPairs.push({ id: 'R1', text: matchItem, type: 'match' });
+
+            // Get two distractors (one for the Malay column, one for the Match column)
+            const distractorWords = allWords
+                .filter(w => w.row !== currentWord.row)
+                .slice(0, 2); 
+            
+            // Distractor 1 (Malay Word)
+            if (distractorWords[0] && distractorWords[0].word_malay) {
+                 matchPairs.push({ id: 'L2', text: distractorWords[0].word_malay, type: 'malay' });
+            } else {
+                 matchPairs.push({ id: 'L2', text: '[空白词]', type: 'malay' });
+            }
+
+            // Distractor 2 (Synonym/Antonym)
+            let distractorMatch = '';
+            if (distractorWords[1]) {
+                distractorMatch = distractorWords[1].synonym || distractorWords[1].antonym || distractorWords[1].meaning_chinese;
+            }
+            if (distractorMatch && distractorMatch !== matchItem) {
+                 matchPairs.push({ id: 'R2', text: distractorMatch, type: 'match' });
+            } else {
+                 matchPairs.push({ id: 'R2', text: `[空白${matchType}]`, type: 'match' });
+            }
+            
+            const leftItems = shuffleArray(matchPairs.filter(p => p.id.startsWith('L')));
+            const rightItems = shuffleArray(matchPairs.filter(p => p.id.startsWith('R')));
+
+            leftSelected = null;
+            rightSelected = null;
+            matchedCount = 0;
+
+            container.innerHTML = `
+                <div class="text-center mb-6">
+                    <p class="text-sm font-medium text-gray-500 uppercase tracking-wider">配对 ${matchType} (${currentWord.word_malay})</p>
+                </div>
+                
+                <div class="card bg-white p-6 md:p-10 rounded-2xl shadow-xl w-full max-w-xl mx-auto border-4 border-accent/10">
+                    ${getSM2MetricsHTML(metrics)}
+                    <div id="feedback-area" class="mb-6 text-center">
+                        <p class="text-gray-600 font-semibold text-lg">点击左侧和右侧的配对项。</p>
+                    </div>
+
+                    <div class="flex justify-around space-x-4 mt-6">
+                        <!-- Left Column (Malay Words - L1, L2, L3) -->
+                        <div id="left-column" class="flex flex-col space-y-3 w-1/2">
+                            ${leftItems.map(item => `
+                                <div id="${item.id}" data-text="${item.text}" data-type="${item.type}" onclick="selectMatchItem(this, 'left')" 
+                                     class="match-item bg-gray-50 border-2 border-gray-200 p-3 rounded-xl text-center text-lg font-semibold hover:bg-gray-100 transition-colors">
+                                    ${item.text}
+                                </div>
+                            `).join('')}
+                        </div>
+
+                        <!-- Right Column (Synonym/Antonym - R1, R2, R3) -->
+                        <div id="right-column" class="flex flex-col space-y-3 w-1/2">
+                            ${rightItems.map(item => `
+                                <div id="${item.id}" data-text="${item.text}" data-type="${item.type}" onclick="selectMatchItem(this, 'right')" 
+                                     class="match-item bg-gray-50 border-2 border-gray-200 p-3 rounded-xl text-center text-lg font-semibold hover:bg-gray-100 transition-colors">
+                                    ${item.text}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+                ${getInGameControls()}
+            `;
+        };
+        
+        window.selectMatchItem = (el, side) => {
+            if (!gameActive) return;
+
+            // Deselect previous
+            if (side === 'left' && leftSelected) leftSelected.classList.remove('selected');
+            if (side === 'right' && rightSelected) rightSelected.classList.remove('selected');
+
+            // Select current
+            el.classList.add('selected');
+            if (side === 'left') leftSelected = el;
+            else rightSelected = el;
+
+            // Check for match
+            if (leftSelected && rightSelected) {
+                const isCorrectMatch = (leftSelected.dataset.text === currentWord.word_malay && rightSelected.dataset.text === (currentWord.synonym || currentWord.antonym)) ||
+                                       (rightSelected.dataset.text === currentWord.word_malay && leftSelected.dataset.text === (currentWord.synonym || currentWord.antonym));
+
+                const feedbackArea = document.getElementById('feedback-area');
+                
+                if (isCorrectMatch) {
+                    leftSelected.classList.add('correct');
+                    rightSelected.classList.add('correct');
+                    leftSelected.classList.remove('selected');
+                    rightSelected.classList.remove('selected');
+                    leftSelected.onclick = null;
+                    rightSelected.onclick = null;
+                    matchedCount++;
+                    
+                    feedbackArea.innerHTML = `<p class="text-success font-bold text-lg">配对成功! 🎉</p>`;
+                    
+                    // Since we only match one pair, this is the end of the game for this word
+                    gameActive = false;
+                    processAnswer(true, 'Correct');
+
+                } else {
+                    leftSelected.classList.add('incorrect');
+                    rightSelected.classList.add('incorrect');
+                    feedbackArea.innerHTML = `<p class="text-error font-bold text-lg">配对错误. ❌</p>`;
+                    
+                    // Immediately mark as wrong and proceed to the next word
+                    gameActive = false;
+                    processAnswer(false, 'Wrong');
+                }
+
+                leftSelected = null;
+                rightSelected = null;
+            }
+        };
+
+        // --- 5. Spelling Game ---
+        
+        const renderSpellingGame = (container) => {
+            const metrics = currentWord.spell;
+            
+            // Randomly select prompt from B, C, D (Chinese Meaning, Synonym, Antonym)
+            const availablePrompts = [];
+            if (currentWord.meaning_chinese) availablePrompts.push({ type: '中文含义', text: currentWord.meaning_chinese });
+            if (currentWord.synonym) availablePrompts.push({ type: '同义词', text: currentWord.synonym });
+            if (currentWord.antonym) availablePrompts.push({ type: '反义词', text: currentWord.antonym });
+            
+            shuffleArray(availablePrompts);
+            const prompt = availablePrompts[0];
+
+            // Answer is always Malay Word (A)
+            container.innerHTML = `
+                <div class="text-center mb-6">
+                    <p class="text-sm font-medium text-gray-500 uppercase tracking-wider">根据${prompt.type}拼写马来语单词</p>
+                </div>
+                
+                <div class="card bg-white p-6 md:p-10 rounded-2xl shadow-xl w-full max-w-lg mx-auto border-4 border-success/10">
+                    <h1 class="text-4xl md:text-5xl font-extrabold text-success mb-3">"${prompt.text}"</h1>
+                    <p class="text-lg text-gray-500 italic mb-3">(${prompt.type})</p>
+                    ${getSM2MetricsHTML(metrics)}
+
+                    <div id="feedback-area" class="mb-6"></div>
+
+                    <div class="flex flex-col space-y-4">
+                        <input type="text" id="spelling-input" placeholder="输入马来语单词..." 
+                               class="w-full text-center text-xl p-3 border-2 border-gray-300 rounded-xl focus:border-success focus:ring-4 focus:ring-success/20 transition-all"
+                               onkeypress="if(event.key === 'Enter') checkSpelling()">
+                        
+                        <button id="spell-submit" onclick="checkSpelling()" 
+                                class="btn-primary bg-success text-white font-semibold py-3 px-8 rounded-xl hover:bg-success/80">
+                            提交答案
+                        </button>
+                    </div>
+                </div>
+                ${getInGameControls()}
+            `;
+            document.getElementById('spelling-input')?.focus();
+        };
+        
+        window.checkSpelling = () => {
+            if (!gameActive) return;
+
+            const inputEl = document.getElementById('spelling-input');
+            const feedbackArea = document.getElementById('feedback-area');
+            const submitBtn = document.getElementById('spell-submit');
+            
+            // Answer is Malay Word (A)
+            const userAnswer = inputEl.value.trim().toLowerCase();
+            const correctAnswer = currentWord.word_malay.trim().toLowerCase();
+
+            inputEl.disabled = true;
+            submitBtn.disabled = true;
+            document.getElementById('in-game-skip').disabled = true; 
+            document.getElementById('in-game-show').disabled = true;
+
+            if (userAnswer === correctAnswer) {
+                inputEl.classList.add('border-success', 'ring-4', 'ring-success/50');
+                feedbackArea.innerHTML = `<p class="text-success font-bold text-center">正确! 🎉</p>`;
+                processAnswer(true, 'Correct');
+            } else {
+                inputEl.classList.add('border-error', 'ring-4', 'ring-error/50');
+                feedbackArea.innerHTML = `<p class="text-error font-bold text-center">错误. 正确的马来语单词是: "${currentWord.word_malay}"</p>`;
+                processAnswer(false, 'Wrong');
+            }
+            
+            submitBtn.classList.add('hidden');
+        };
+
+        // --- Shared Controls ---
+        
+        const getInGameControls = () => {
+             return `<div class="mt-6 flex justify-center space-x-4">
+                <button id="in-game-skip" onclick="skipWord()" class="text-gray-500 hover:text-gray-700 py-2 px-4 rounded-full transition-colors">
+                    跳过 (计入失败)
+                </button>
+                <button id="in-game-show" onclick="showAnswer()" class="text-accent hover:text-orange-700 py-2 px-4 rounded-full transition-colors">
+                    显示答案 (计入失败)
+                </button>
+            </div>`;
+        }
+
+        window.skipWord = () => {
+            if (!gameActive) return;
+
+            const feedbackArea = document.getElementById('feedback-area');
+            feedbackArea.innerHTML = `<p class="text-error font-bold text-center">已跳过. 正确答案是: "${currentWord.word_malay}"</p>`;
+
+            const inputEl = document.getElementById('spelling-input');
+            if(inputEl) inputEl.disabled = true;
+            const submitBtn = document.getElementById('spell-submit');
+            if(submitBtn) { submitBtn.disabled = true; submitBtn.classList.add('hidden'); }
+            
+            document.querySelectorAll('.match-item').forEach(el => el.onclick = null); // Disable match items
+            
+            document.getElementById('in-game-skip').disabled = true;
+            document.getElementById('in-game-show').disabled = true;
+            
+            processAnswer(false, 'Skipped'); 
+        };
+
+        window.showAnswer = () => {
+            if (!gameActive) return;
+
+            const feedbackArea = document.getElementById('feedback-area');
+            feedbackArea.innerHTML = `<p class="text-error font-bold text-center">答案已显示: "${currentWord.word_malay}". 计入失败.</p>`;
+
+            const inputEl = document.getElementById('spelling-input');
+            if(inputEl) { inputEl.value = currentWord.word_malay; inputEl.disabled = true; }
+            const submitBtn = document.getElementById('spell-submit');
+            if(submitBtn) { submitBtn.disabled = true; submitBtn.classList.add('hidden'); }
+            
+            document.querySelectorAll('.match-item').forEach(el => el.onclick = null); // Disable match items
+
+            document.getElementById('in-game-skip').disabled = true;
+            document.getElementById('in-game-show').disabled = true;
+            
+            processAnswer(false, 'Wrong'); 
+        };
+
+        // --- Initialization ---
+
+        async function loadWords() {
+            if (isLoading || appInitialized) return;
+            isLoading = true;
+            const statusEl = document.getElementById('loading-status');
+            statusEl.textContent = "正在从 Google 表格加载词汇表...";
+
+            try {
+                const result = await apiCall({ action: 'fetchWords' });
+
+                if (result.status !== 'success') {
+                    throw new Error(result.message || "Unknown error during fetchWords.");
+                }
+
+                allWords = result.words;
+                coins = result.coinCount;
+                totalFails = result.totalFails;
+                
+                document.getElementById('main-app-card').classList.remove('hidden');
+                appInitialized = true;
+                
+                if (allWords.length === 0) {
+                    statusEl.textContent = "您的词汇表为空！请在第 3 行开始的 A 和 B 列中添加词汇和中文含义。";
+                    updateUIElements();
+                } else {
+                    statusEl.textContent = `已加载 ${allWords.length} 个词汇。请选择复习模式。`;
+                    updateUIElements();
+                    showModeSelection();
+                }
+
+            } catch (error) {
+                console.error("Critical error during word loading:", error);
+                
+                let displayError = error.message;
+                if (API_URL.includes("PASTE-YOUR-APPS-SCRIPT-ID-HERE")) {
+                     displayError = "API URL 仍是占位符。请务必用您的实际部署 URL 替换代码中的占位符！";
+                }
+
+                statusEl.innerHTML = `
+                    <p class="text-error font-semibold">严重错误: 数据加载失败。</p>
+                    <p class="text-sm text-gray-700 mt-2">请确保 API URL 设置正确，且 Google Apps Script Web 应用已部署为“任何人”访问。</p>
+                    <ul class="list-disc list-inside text-left mx-auto max-w-sm mt-2 space-y-1 text-xs text-red-700">
+                        <li>错误详情: ${displayError}</li>
+                    </ul>
+                `;
+            } finally {
+                isLoading = false;
+            }
+        }
+        
+        document.addEventListener('DOMContentLoaded', loadWords);
+    </script>
+
+    <!-- Main Application Container -->
+    <div id="main-app-card" class="bg-white rounded-3xl p-6 md:p-8 w-full max-w-2xl shadow-2xl hidden">
+        
+        <!-- Header: Stats and Progress -->
+        <header class="flex justify-between items-center pb-4 border-b border-gray-100 mb-6">
+            <div class="flex items-center space-x-2 text-gold">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 fill-current" viewBox="0 0 24 24">
+                    <path d="M12 1L9 7l-6 .5 4 4.5L5 18l7-4 7 4-2-6.5 4-4.5-6-.5z"/>
+                </svg>
+                <span id="coin-count" class="text-xl font-bold text-gray-800">0</span>
+                <span class="text-sm font-semibold text-gray-500 ml-1">金币</span>
+            </div>
+            
+            <div id="mode-indicator" class="text-sm font-bold text-gray-700">
+                选择模式
+            </div>
+
+            <div id="progress-indicator" class="text-sm font-medium text-primary">
+                进度: 0 / 0
+            </div>
+
+            <div class="text-sm font-medium text-error">
+                失败: <span id="fail-count" class="text-base font-bold">0</span>
+            </div>
+        </header>
+
+        <!-- Game Content Area -->
+        <div id="game-container" class="flex flex-col items-center justify-center min-h-[300px]">
+            <!-- Loading message or mode selection -->
+            <div id="loading-status" class="text-center p-8 text-gray-600">
+                正在初始化应用程序...
+            </div>
+        </div>
+        
+    </div>
+
+</body>
+</html>
